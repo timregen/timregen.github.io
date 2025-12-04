@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tim Regen</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --accent: #0466c8;
+      --background: #f5f6fa;
+      --text: #22223b;
+      --subtle: #767676;
+    }
+
+    body {
+      background: var(--background);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      font-family: 'Roboto', Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    main {
+      text-align: center;
+      box-shadow: 0 5px 30px rgba(60, 100, 200, 0.07);
+      background: #fff;
+      padding: 3em 2em 2em 2em;
+      border-radius: 1.5em;
+      max-width: 400px;
+      margin: 2em;
+    }
+
+    h1 {
+      margin-top: 0;
+      font-family: 'Inter', Arial, sans-serif;
+      font-size: 2.85em;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: -1px;
+    }
+
+    .subtitle {
+      color: var(--subtle);
+      margin-top: 0.2em;
+      margin-bottom: 1.8em;
+      font-size: 1.1em;
+      letter-spacing: 0.05em;
+    }
+
+    .links {
+      margin-top: 2em;
+      display: flex;
+      flex-direction: column;
+      gap: 1em;
+    }
+
+    .links a {
+      color: #fff;
+      background: var(--accent);
+      padding: 0.65em 1.6em;
+      border-radius: 999px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: background 0.18s;
+      display: inline-block;
+    }
+
+    .links a:hover {
+      background: #0352a0;
+    }
+
+    @media (max-width: 500px) {
+      main {
+        padding: 2em 0.7em;
+      }
+      h1 {
+        font-size: 2em;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Tim Regen</h1>
+    <div class="subtitle">👋 Welcome!<br>
+      My site is launching soon.
+    </div>
+    <div>
+      I'm building something cool here.<br>
+      Meanwhile, check out my GitHub and say hello!
+    </div>
+    <div class="links">
+      <a href="https://github.com/timregen" target="_blank" rel="noopener">GitHub</a>
+      <a href="mailto:your@email.com">Contact Me</a>
+    </div>
+  </main>
+</body>
+</html>
