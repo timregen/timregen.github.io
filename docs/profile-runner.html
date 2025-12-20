@@ -87,6 +87,17 @@
   // Input
   // ----------------------------
   const keys = new Set();
+  const touchButtons = {
+    left: { x: 20, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
+    right: { x: 70, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
+    jump: { x: INTERNAL_W - 110, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
+    interact: { x: INTERNAL_W - 60, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
+    profile: { x: INTERNAL_W - 110, y: 20, w: 40, h: 20, active: false },
+    artifacts: { x: INTERNAL_W - 60, y: 20, w: 40, h: 20, active: false },
+  };
+  
+  let touchScrollStart = null;
+  
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (['arrowleft','arrowright',' ','z','x'].includes(k) || ['arrowleft','arrowright'].includes(e.key.toLowerCase())) {
@@ -129,6 +140,101 @@
     if (k === 'p') state.pHeld = false;
     if (k === 'a') state.aHeld = false;
   });
+  
+  // Touch events
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (const touch of e.changedTouches) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = INTERNAL_W / rect.width;
+      const scaleY = INTERNAL_H / rect.height;
+      const tx = (touch.clientX - rect.left) * scaleX;
+      const ty = (touch.clientY - rect.top) * scaleY;
+      
+      // Check touch buttons
+      if (tx >= touchButtons.left.x && tx <= touchButtons.left.x + touchButtons.left.w &&
+          ty >= touchButtons.left.y && ty <= touchButtons.left.y + touchButtons.left.h) {
+        touchButtons.left.active = true;
+        keys.add('arrowleft');
+      }
+      if (tx >= touchButtons.right.x && tx <= touchButtons.right.x + touchButtons.right.w &&
+          ty >= touchButtons.right.y && ty <= touchButtons.right.y + touchButtons.right.h) {
+        touchButtons.right.active = true;
+        keys.add('arrowright');
+      }
+      if (tx >= touchButtons.jump.x && tx <= touchButtons.jump.x + touchButtons.jump.w &&
+          ty >= touchButtons.jump.y && ty <= touchButtons.jump.y + touchButtons.jump.h) {
+        touchButtons.jump.active = true;
+        keys.add('z');
+      }
+      if (tx >= touchButtons.interact.x && tx <= touchButtons.interact.x + touchButtons.interact.w &&
+          ty >= touchButtons.interact.y && ty <= touchButtons.interact.y + touchButtons.interact.h) {
+        touchButtons.interact.active = true;
+        keys.add('x');
+      }
+      if (tx >= touchButtons.profile.x && tx <= touchButtons.profile.x + touchButtons.profile.w &&
+          ty >= touchButtons.profile.y && ty <= touchButtons.profile.y + touchButtons.profile.h) {
+        state.showProfile = !state.showProfile;
+        if (state.showProfile) state.profileScroll = 0;
+      }
+      if (tx >= touchButtons.artifacts.x && tx <= touchButtons.artifacts.x + touchButtons.artifacts.w &&
+          ty >= touchButtons.artifacts.y && ty <= touchButtons.artifacts.y + touchButtons.artifacts.h) {
+        state.showArtifacts = !state.showArtifacts;
+        if (state.showArtifacts) state.artifactsScroll = 0;
+      }
+      
+      // Handle scrolling in overlays
+      if (state.showProfile || state.showArtifacts) {
+        touchScrollStart = { y: ty, scroll: state.showProfile ? state.profileScroll : state.artifactsScroll };
+      }
+    }
+  }, { passive: false });
+  
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (touchScrollStart && (state.showProfile || state.showArtifacts)) {
+      const touch = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const scaleY = INTERNAL_H / rect.height;
+      const ty = (touch.clientY - rect.top) * scaleY;
+      const delta = touchScrollStart.y - ty;
+      
+      if (state.showProfile) {
+        state.profileScroll = Math.max(0, Math.min(300, touchScrollStart.scroll + delta));
+      } else if (state.showArtifacts) {
+        state.artifactsScroll = Math.max(0, Math.min(200, touchScrollStart.scroll + delta));
+      }
+    }
+  }, { passive: false });
+  
+  canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    for (const touch of e.changedTouches) {
+      // Release all touch buttons
+      touchButtons.left.active = false;
+      touchButtons.right.active = false;
+      touchButtons.jump.active = false;
+      touchButtons.interact.active = false;
+      keys.delete('arrowleft');
+      keys.delete('arrowright');
+      keys.delete('z');
+      keys.delete('x');
+    }
+    touchScrollStart = null;
+  }, { passive: false });
+  
+  canvas.addEventListener('touchcancel', (e) => {
+    e.preventDefault();
+    touchButtons.left.active = false;
+    touchButtons.right.active = false;
+    touchButtons.jump.active = false;
+    touchButtons.interact.active = false;
+    keys.delete('arrowleft');
+    keys.delete('arrowright');
+    keys.delete('z');
+    keys.delete('x');
+    touchScrollStart = null;
+  }, { passive: false });
 
   function pressed(k) { return keys.has(k); }
 
@@ -284,8 +390,11 @@
     vy: 0,
     w: 14,
     h: 18,
+    baseW: 14,
+    baseH: 18,
     onGround: false,
     face: 1,
+    skillsParkCollected: 0,
   };
 
   // ----------------------------
@@ -518,27 +627,32 @@
   function drawPlayer() {
     const sx = worldToScreenX(player.x);
     const sy = worldToScreenY(player.y);
+    
+    // Calculate scale factor based on current size vs base size
+    const scale = player.w / player.baseW;
 
     // body (simple sprite blocks)
     ctx.fillStyle = "#f97316"; // shirt
     ctx.fillRect(sx, sy, player.w, player.h);
 
-    // face
+    // face (scaled)
     ctx.fillStyle = "#fde68a";
-    ctx.fillRect(sx+3, sy+3, 8, 6);
+    ctx.fillRect(sx + 3 * scale, sy + 3 * scale, 8 * scale, 6 * scale);
 
-    // hair
+    // hair (scaled)
     ctx.fillStyle = "#111827";
-    ctx.fillRect(sx+3, sy+2, 8, 2);
+    ctx.fillRect(sx + 3 * scale, sy + 2 * scale, 8 * scale, 2 * scale);
 
-    // eye
+    // eye (scaled)
     ctx.fillStyle = "#111827";
-    ctx.fillRect(sx + (player.face>0 ? 8 : 5), sy+5, 1, 1);
+    const eyeX = sx + (player.face > 0 ? 8 : 5) * scale;
+    const eyeSize = Math.max(1, scale);
+    ctx.fillRect(eyeX, sy + 5 * scale, eyeSize, eyeSize);
 
-    // legs
+    // legs (scaled)
     ctx.fillStyle = "#1f2937";
-    ctx.fillRect(sx+2, sy+12, 4, 6);
-    ctx.fillRect(sx+8, sy+12, 4, 6);
+    ctx.fillRect(sx + 2 * scale, sy + 12 * scale, 4 * scale, 6 * scale);
+    ctx.fillRect(sx + 8 * scale, sy + 12 * scale, 4 * scale, 6 * scale);
   }
 
   function drawMarkerOverlay(m) {
@@ -1049,7 +1163,9 @@
     // jump (manual control)
     const wantsJump = pressed('z') || pressed('space');
     if (wantsJump && player.onGround) {
-      player.vy = -5.9;
+      // Jump height increases with Skills Park artifacts collected
+      const jumpBoost = state.mode === "PLAY" ? player.skillsParkCollected * 0.15 : 0;
+      player.vy = -5.9 - jumpBoost;
       player.onGround = false;
     }
 
@@ -1161,8 +1277,21 @@
         if (aabb(player.x, player.y, player.w, player.h, a.x-6, a.y-6, 12, 12)) {
           a.taken = true;
           state.score += 1;
+          player.skillsParkCollected += 1;
+          
+          // Store old dimensions
+          const oldH = player.h;
+          
+          // Grow player size with each artifact (up to 2x base size)
+          const growthFactor = Math.min(2.0, 1.0 + (player.skillsParkCollected * 0.05));
+          player.w = player.baseW * growthFactor;
+          player.h = player.baseH * growthFactor;
+          
+          // Adjust y position to keep feet at same level
+          player.y += (oldH - player.h);
+          
           ui.score.textContent = String(state.score);
-          showToast(`Collected: <b>${a.label}</b> (+1)`, 900);
+          showToast(`Collected: <b>${a.label}</b> (+1) 💪 Growing stronger!`, 900);
         }
       }
     }
@@ -1195,6 +1324,9 @@
     player.vx = 0;
     player.vy = 0;
     player.onGround = false;
+    player.w = player.baseW;
+    player.h = player.baseH;
+    player.skillsParkCollected = 0;
     
     // Reset markers
     markers.forEach(m => m.collected = false);
@@ -1278,6 +1410,68 @@
       ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
       ctx.fillText("→ NOW gate ahead (press X)", 12, 248);
     }
+    
+    // Draw touch controls
+    if (!state.showProfile && !state.showArtifacts) {
+      // Left button
+      ctx.fillStyle = touchButtons.left.active ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.3)";
+      ctx.fillRect(touchButtons.left.x, touchButtons.left.y, touchButtons.left.w, touchButtons.left.h);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(touchButtons.left.x, touchButtons.left.y, touchButtons.left.w, touchButtons.left.h);
+      ctx.fillStyle = "#fff";
+      ctx.font = "20px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("←", touchButtons.left.x + 12, touchButtons.left.y + 28);
+      
+      // Right button
+      ctx.fillStyle = touchButtons.right.active ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.3)";
+      ctx.fillRect(touchButtons.right.x, touchButtons.right.y, touchButtons.right.w, touchButtons.right.h);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(touchButtons.right.x, touchButtons.right.y, touchButtons.right.w, touchButtons.right.h);
+      ctx.fillStyle = "#fff";
+      ctx.font = "20px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("→", touchButtons.right.x + 12, touchButtons.right.y + 28);
+      
+      // Jump button
+      ctx.fillStyle = touchButtons.jump.active ? "rgba(34,197,94,0.6)" : "rgba(34,197,94,0.4)";
+      ctx.fillRect(touchButtons.jump.x, touchButtons.jump.y, touchButtons.jump.w, touchButtons.jump.h);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(touchButtons.jump.x, touchButtons.jump.y, touchButtons.jump.w, touchButtons.jump.h);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("JUMP", touchButtons.jump.x + 8, touchButtons.jump.y + 24);
+      
+      // Interact button
+      ctx.fillStyle = touchButtons.interact.active ? "rgba(96,165,250,0.6)" : "rgba(96,165,250,0.4)";
+      ctx.fillRect(touchButtons.interact.x, touchButtons.interact.y, touchButtons.interact.w, touchButtons.interact.h);
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(touchButtons.interact.x, touchButtons.interact.y, touchButtons.interact.w, touchButtons.interact.h);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("X", touchButtons.interact.x + 15, touchButtons.interact.y + 24);
+    }
+    
+    // Profile/Artifacts buttons (always visible)
+    ctx.fillStyle = state.showProfile ? "rgba(244,114,182,0.6)" : "rgba(0,0,0,0.3)";
+    ctx.fillRect(touchButtons.profile.x, touchButtons.profile.y, touchButtons.profile.w, touchButtons.profile.h);
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(touchButtons.profile.x, touchButtons.profile.y, touchButtons.profile.w, touchButtons.profile.h);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("P", touchButtons.profile.x + 15, touchButtons.profile.y + 13);
+    
+    ctx.fillStyle = state.showArtifacts ? "rgba(34,197,94,0.6)" : "rgba(0,0,0,0.3)";
+    ctx.fillRect(touchButtons.artifacts.x, touchButtons.artifacts.y, touchButtons.artifacts.w, touchButtons.artifacts.h);
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(touchButtons.artifacts.x, touchButtons.artifacts.y, touchButtons.artifacts.w, touchButtons.artifacts.h);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("A", touchButtons.artifacts.x + 15, touchButtons.artifacts.y + 13);
   }
 
   // Start
