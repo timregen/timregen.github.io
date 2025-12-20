@@ -1283,7 +1283,7 @@
           const oldH = player.h;
           
           // Grow player size with each artifact (up to 2x base size)
-          const growthFactor = Math.min(2.0, 1.0 + (player.skillsParkCollected * 0.05));
+          const growthFactor = 1.0 + (player.skillsParkCollected * 0.25);
           player.w = player.baseW * growthFactor;
           player.h = player.baseH * growthFactor;
           
