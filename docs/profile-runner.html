@@ -1,0 +1,1292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tim Regen — 16-bit Profile Side-Scroller</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #0b0f1a; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; image-rendering: crisp-edges; }
+    .hud {
+      position: fixed; left: 12px; top: 12px; right: 12px;
+      display: flex; gap: 12px; align-items: center; justify-content: space-between;
+      pointer-events: none; user-select: none;
+    }
+    .panel {
+      pointer-events: none;
+      background: rgba(0,0,0,0.45);
+      border: 2px solid rgba(255,255,255,0.15);
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+      max-width: min(680px, 92vw);
+      line-height: 1.25;
+    }
+    .title { font-weight: 800; letter-spacing: 0.5px; }
+    .dim { opacity: 0.8; }
+    .kbd { display: inline-block; padding: 1px 6px; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; background: rgba(255,255,255,0.08); }
+    .toast {
+      position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      border: 2px solid rgba(255,255,255,0.18);
+      border-radius: 12px;
+      padding: 10px 14px;
+      max-width: min(760px, 92vw);
+      text-align: center;
+      pointer-events: none;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.35);
+    }
+    a { color: #7dd3fc; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <div class="panel">
+    <div class="title">Tim Regen — Profile Runner</div>
+    <div class="dim" id="modeLine">Mode: TIMELINE (run to NOW)</div>
+    <div class="dim">Move: <span class="kbd">←</span> <span class="kbd">→</span> Jump: <span class="kbd">Z</span>/<span class="kbd">Space</span> Interact: <span class="kbd">X</span> Show Profile: <span class="kbd">P</span> Artifacts: <span class="kbd">A</span></div>
+  </div>
+  <div class="panel">
+    <div class="dim">Artifacts: <span id="score">0</span></div>
+    <div class="dim">Position: <span id="pos">0</span></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" style="display:none;"></div>
+
+<script>
+(() => {
+  // ----------------------------
+  // Pixel-ish renderer setup
+  // ----------------------------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // We render at a low internal resolution for crisp pixels.
+  const INTERNAL_W = 480;
+  const INTERNAL_H = 270;
+
+  function resize() {
+    canvas.width = INTERNAL_W;
+    canvas.height = INTERNAL_H;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const ui = {
+    score: document.getElementById('score'),
+    pos: document.getElementById('pos'),
+    toast: document.getElementById('toast'),
+    modeLine: document.getElementById('modeLine'),
+  };
+
+  // ----------------------------
+  // Input
+  // ----------------------------
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (['arrowleft','arrowright',' ','z','x'].includes(k) || ['arrowleft','arrowright'].includes(e.key.toLowerCase())) {
+      e.preventDefault();
+    }
+    keys.add(k === ' ' ? 'space' : k);
+    if (e.key === 'ArrowLeft') keys.add('arrowleft');
+    if (e.key === 'ArrowRight') keys.add('arrowright');
+    
+    // Toggle profile overlay with P key
+    if (k === 'p') {
+      e.preventDefault();
+      if (!state.pHeld) {
+        state.pHeld = true;
+        state.showProfile = !state.showProfile;
+        if (state.showProfile) {
+          state.profileScroll = 0; // Reset scroll when opening
+        }
+      }
+    }
+    
+    // Toggle artifacts overlay with A key
+    if (k === 'a') {
+      e.preventDefault();
+      if (!state.aHeld) {
+        state.aHeld = true;
+        state.showArtifacts = !state.showArtifacts;
+        if (state.showArtifacts) {
+          state.artifactsScroll = 0; // Reset scroll when opening
+        }
+      }
+    }
+  }, { passive: false });
+
+  window.addEventListener('keyup', (e) => {
+    const k = e.key.toLowerCase();
+    keys.delete(k === ' ' ? 'space' : k);
+    if (e.key === 'ArrowLeft') keys.delete('arrowleft');
+    if (e.key === 'ArrowRight') keys.delete('arrowright');
+    if (k === 'p') state.pHeld = false;
+    if (k === 'a') state.aHeld = false;
+  });
+
+  function pressed(k) { return keys.has(k); }
+
+  // ----------------------------
+  // World / timeline content
+  // ----------------------------
+  // Units are "pixels" in the internal resolution. World is side-scrolling along x.
+  const world = {
+    gravity: 0.35,
+    floorY: 220,
+    width: 2600, // long enough to hold timeline + NOW + a bit of play space
+  };
+
+  // Timeline markers you can expand.
+  // "x" positions determine where signposts show up in the level.
+  const markers = [
+    {
+      x: 210,
+      title: "Pre-2023: Foundations",
+      lines: [
+        "Enterprise software engineer & architecting mindset",
+        "Focus: developer experience, automation, platform thinking",
+      ],
+      color: "#a78bfa",
+      collected: false,
+      icon: "wrench",
+      artifacts: [
+        { name: "Java/Spring", ox: -15, oy: -25 },
+        { name: "Microservices", ox: 5, oy: -35 },
+        { name: "Docker/K8s", ox: 25, oy: -40 },
+        { name: "CI/CD", ox: 45, oy: -38 },
+        { name: "REST APIs", ox: 65, oy: -30 },
+      ],
+    },
+    {
+      x: 490,
+      title: "Jan 2023 — Citi (VP Lead Software Engineer)",
+      lines: [
+        "Developer Experience / Infrastructure Provisioning",
+        "Microservices: Spring Boot, Kafka, MongoDB, OPA/REGO",
+        "Cross-team design + integration work",
+      ],
+      color: "#34d399",
+      collected: false,
+      icon: "building",
+      artifacts: [
+        { name: "Kafka", ox: -15, oy: -25 },
+        { name: "MongoDB", ox: 0, oy: -35 },
+        { name: "OPA/REGO", ox: 15, oy: -40 },
+        { name: "Spring Boot", ox: 30, oy: -40 },
+        { name: "GitLab", ox: 45, oy: -36 },
+        { name: "Terraform", ox: 60, oy: -28 },
+      ],
+    },
+    {
+      x: 840,
+      title: "2024: Templates + Logical Templates",
+      lines: [
+        "Models for blocks, rulesets, parameters, versions",
+        "Design-doc generation + diagrams",
+        "Role-based flows: Dev, Component Architect, Approver",
+      ],
+      color: "#fbbf24",
+      collected: false,
+      icon: "document",
+      artifacts: [
+        { name: "Design Patterns", ox: -15, oy: -25 },
+        { name: "API Design", ox: 0, oy: -35 },
+        { name: "Documentation", ox: 15, oy: -40 },
+        { name: "Architecture", ox: 30, oy: -40 },
+        { name: "Versioning", ox: 45, oy: -36 },
+        { name: "YAML/JSON", ox: 60, oy: -28 },
+      ],
+    },
+    {
+      x: 1230,
+      title: "2025: Testing & 'Self-Healing' Workstream",
+      lines: [
+        "Full service test framework (local→dev→UAT→prod)",
+        "Tekton CI/CD, dashboards, gating, Zephyr/Jira",
+        "E2E coverage with Cypress + reporting",
+      ],
+      color: "#60a5fa",
+      collected: false,
+      icon: "checkmark",
+      artifacts: [
+        { name: "Cypress", ox: -15, oy: -25 },
+        { name: "Tekton", ox: 0, oy: -35 },
+        { name: "Test Strategy", ox: 15, oy: -40 },
+        { name: "Dashboards", ox: 30, oy: -40 },
+        { name: "Jira/Zephyr", ox: 45, oy: -36 },
+        { name: "E2E Testing", ox: 60, oy: -28 },
+      ],
+    },
+    {
+      x: 1590,
+      title: "Oct 2025: Career Reset",
+      lines: [
+        "Layoff → regroup, rebuild portfolio, apply smarter",
+        "Turning big systems experience into productized demos",
+      ],
+      color: "#fb7185",
+      collected: false,
+      icon: "refresh",
+      artifacts: [
+        { name: "Portfolio", ox: -15, oy: -25 },
+        { name: "React/Vite", ox: 5, oy: -35 },
+        { name: "Canvas/Games", ox: 25, oy: -40 },
+        { name: "Demos", ox: 45, oy: -38 },
+        { name: "Resilience", ox: 65, oy: -30 },
+      ],
+    },
+  ];
+
+  // NOW gate — hitting it switches the game to interactive play mode.
+  const NOW_X = 1900;
+
+  // Build marker artifacts (skills at each milestone)
+  const markerArtifacts = [];
+  markers.forEach(m => {
+    m.artifacts.forEach(a => {
+      markerArtifacts.push({
+        x: m.x + a.ox,
+        y: world.floorY + a.oy,
+        r: 5,
+        taken: false,
+        label: a.name,
+        color: m.color,
+      });
+    });
+  });
+
+  // Play-mode artifacts (collectibles)
+  const artifacts = [];
+  for (let i = 0; i < 18; i++) {
+    artifacts.push({
+      x: NOW_X + 110 + i * 60,
+      y: 180 - (i % 3) * 18,
+      r: 6,
+      taken: false,
+      label: (i % 3 === 0) ? "Prototype" : (i % 3 === 1) ? "Design" : "Demo",
+      color: "#22c55e",
+    });
+  }
+
+  // ----------------------------
+  // Player
+  // ----------------------------
+  const player = {
+    x: 60,
+    y: world.floorY - 20,
+    vx: 0,
+    vy: 0,
+    w: 14,
+    h: 18,
+    onGround: false,
+    face: 1,
+  };
+
+  // ----------------------------
+  // Camera / game state
+  // ----------------------------
+  const state = {
+    mode: "TIMELINE", // TIMELINE -> PLAY
+    camX: 0,
+    camY: 0,
+    score: 0,
+    lastToastAt: 0,
+    activeMarker: null,
+    lockAtNow: false,
+    nowGateTimer: 0,
+    nowGateWaitTime: 15000, // 15 seconds in ms
+    returnMode: null, // {milestone, checkX, targetX}
+    lastJumpedMilestone: null,
+    showProfile: false,
+    profileScroll: 0,
+    showArtifacts: false,
+    artifactsScroll: 0,
+  };
+
+  function showToast(html, ms=2200) {
+    ui.toast.innerHTML = html;
+    ui.toast.style.display = 'block';
+    const t = performance.now();
+    state.lastToastAt = t;
+    setTimeout(() => {
+      if (state.lastToastAt === t) ui.toast.style.display = 'none';
+    }, ms);
+  }
+
+  // ----------------------------
+  // Helpers
+  // ----------------------------
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function aabb(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  }
+
+  // ----------------------------
+  // Drawing (16-bit vibe via simple pixel shapes)
+  // ----------------------------
+  function drawSky() {
+    // gradient-ish bands
+    ctx.fillStyle = "#060816"; ctx.fillRect(0,0,INTERNAL_W,INTERNAL_H);
+    ctx.fillStyle = "#0b1630"; ctx.fillRect(0,0,INTERNAL_W,INTERNAL_H*0.55);
+    ctx.fillStyle = "#0b0f1a"; ctx.fillRect(0,INTERNAL_H*0.55,INTERNAL_W,INTERNAL_H*0.45);
+
+    // stars
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    for (let i=0;i<50;i++){
+      const x = (i*97 % 487);
+      const y = (i*53 % 140);
+      ctx.fillRect((x + (state.camX*0.1)%INTERNAL_W)|0, y, 1, 1);
+    }
+  }
+
+  function drawParallax() {
+    // distant skyline
+    const baseY = 160;
+    const offset = -((state.camX*0.2) % 240);
+    for (let i=0;i<5;i++){
+      const x = offset + i*240;
+      ctx.fillStyle = "rgba(96,165,250,0.12)";
+      ctx.fillRect(x, baseY-40, 60, 40);
+      ctx.fillRect(x+70, baseY-60, 80, 60);
+      ctx.fillRect(x+160, baseY-30, 50, 30);
+    }
+  }
+
+  function drawGround() {
+    const floorY = world.floorY - state.camY;
+    // ground base
+    ctx.fillStyle = "#12301f";
+    ctx.fillRect(0, floorY, INTERNAL_W, INTERNAL_H - floorY);
+
+    // ground top strip
+    ctx.fillStyle = "#1f6f43";
+    ctx.fillRect(0, floorY, INTERNAL_W, 6);
+
+    // pixel grass dots
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    for (let i=0;i<INTERNAL_W;i+=10){
+      ctx.fillRect(i, floorY+6 + ((i*7)%10), 3, 1);
+    }
+  }
+
+  function worldToScreenX(wx){ return (wx - state.camX) | 0; }
+  function worldToScreenY(wy){ return (wy - state.camY) | 0; }
+
+  function draw16bitIcon(sx, sy, icon, color) {
+    // Draw pixel art company/brand icons (16x16)
+    
+    switch(icon) {
+      case "wrench":
+        // Code/Tools icon (generic tech foundations)
+        ctx.fillStyle = "#a78bfa";
+        ctx.fillRect(sx+2, sy+3, 2, 8);  // handle
+        ctx.fillRect(sx+4, sy+3, 4, 2);  // top jaw
+        ctx.fillRect(sx+4, sy+9, 4, 2);  // bottom jaw
+        ctx.fillRect(sx+8, sy+5, 2, 4);  // adjustment nut
+        ctx.fillRect(sx+10, sy+7, 4, 2); // wrench head extension
+        break;
+        
+      case "building":
+        // Citi logo: blue "citi" text with red arc
+        // Red arc
+        ctx.fillStyle = "#ef4444";
+        ctx.fillRect(sx+5, sy+2, 6, 1);
+        ctx.fillRect(sx+4, sy+3, 1, 1);
+        ctx.fillRect(sx+11, sy+3, 1, 1);
+        // Blue "citi" letters (simplified pixel art)
+        ctx.fillStyle = "#3b82f6";
+        // c
+        ctx.fillRect(sx+2, sy+5, 2, 5);
+        ctx.fillRect(sx+2, sy+5, 3, 1);
+        ctx.fillRect(sx+2, sy+9, 3, 1);
+        // i
+        ctx.fillRect(sx+5, sy+5, 2, 5);
+        // t
+        ctx.fillRect(sx+7, sy+4, 2, 6);
+        ctx.fillRect(sx+6, sy+5, 4, 1);
+        // i
+        ctx.fillRect(sx+10, sy+5, 2, 5);
+        break;
+        
+      case "document":
+        // Template/Documentation icon
+        ctx.fillStyle = "#fbbf24";
+        ctx.fillRect(sx+3, sy+2, 9, 10);  // page
+        ctx.fillRect(sx+10, sy+2, 2, 2);  // folded corner
+        ctx.fillStyle = "rgba(0,0,0,0.4)";
+        ctx.fillRect(sx+5, sy+5, 5, 1);   // text line 1
+        ctx.fillRect(sx+5, sy+7, 5, 1);   // text line 2
+        ctx.fillRect(sx+5, sy+9, 3, 1);   // text line 3
+        break;
+        
+      case "checkmark":
+        // Testing/QA checkmark badge
+        ctx.fillStyle = "#60a5fa";
+        // Shield outline
+        ctx.fillRect(sx+5, sy+2, 6, 2);
+        ctx.fillRect(sx+4, sy+4, 8, 4);
+        ctx.fillRect(sx+5, sy+8, 6, 3);
+        ctx.fillRect(sx+6, sy+11, 4, 1);
+        // Checkmark
+        ctx.fillStyle = "#22c55e";
+        ctx.fillRect(sx+6, sy+7, 1, 2);
+        ctx.fillRect(sx+7, sy+8, 1, 2);
+        ctx.fillRect(sx+8, sy+6, 1, 2);
+        ctx.fillRect(sx+9, sy+4, 1, 2);
+        break;
+        
+      case "refresh":
+        // Career reset/reload icon
+        ctx.fillStyle = "#fb7185";
+        // Circular arrow
+        ctx.fillRect(sx+6, sy+2, 4, 2);   // top
+        ctx.fillRect(sx+10, sy+4, 2, 4);  // right
+        ctx.fillRect(sx+6, sy+10, 4, 2);  // bottom
+        ctx.fillRect(sx+4, sy+6, 2, 4);   // left
+        // Arrow heads
+        ctx.fillRect(sx+11, sy+2, 2, 2);  // top-right arrow
+        ctx.fillRect(sx+4, sy+10, 2, 2);  // bottom-left arrow
+        break;
+    }
+  }
+
+  function drawSignpost(m) {
+    const sx = worldToScreenX(m.x);
+    const sy = worldToScreenY(world.floorY - 88);
+    // pole
+    ctx.fillStyle = "#8b5e34";
+    ctx.fillRect(sx+20, sy+16, 6, 64);
+    // sign background
+    ctx.fillStyle = "#2d3748";
+    ctx.fillRect(sx, sy, 96, 32);
+    // icon area
+    ctx.fillStyle = m.color;
+    ctx.fillRect(sx+4, sy+4, 32, 24);
+    // draw 16bit icon (scaled 2x)
+    ctx.save();
+    ctx.translate(sx+4, sy+4);
+    ctx.scale(2, 2);
+    draw16bitIcon(0, 0, m.icon, "rgba(0,0,0,0.6)");
+    ctx.restore();
+    // label area
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fillRect(sx+40, sy+8, 52, 16);
+    
+    // Show gem if not collected
+    if (!m.collected) {
+      ctx.fillStyle = "#22c55e";
+      ctx.fillRect(sx+76, sy-20, 16, 16);
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.fillRect(sx+78, sy-18, 4, 4);
+    }
+  }
+
+  function drawNowGate() {
+    const sx = worldToScreenX(NOW_X);
+    const topY = worldToScreenY(world.floorY - 90);
+    // pillars
+    ctx.fillStyle = "#9ca3af";
+    ctx.fillRect(sx, topY, 18, 90);
+    ctx.fillRect(sx+90, topY, 18, 90);
+    // header
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(sx, topY, 108, 18);
+    // "Skills Park" text
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("SKILLS PARK", sx+18, topY+11);
+  }
+
+  function drawArtifact(a) {
+    if (a.taken) return;
+    const sx = worldToScreenX(a.x);
+    const sy = worldToScreenY(a.y);
+    // gem-ish with color
+    ctx.fillStyle = a.color || "#22c55e";
+    ctx.fillRect(sx-4, sy-4, 8, 8);
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillRect(sx-3, sy-3, 2, 2);
+  }
+
+  function drawPlayer() {
+    const sx = worldToScreenX(player.x);
+    const sy = worldToScreenY(player.y);
+
+    // body (simple sprite blocks)
+    ctx.fillStyle = "#f97316"; // shirt
+    ctx.fillRect(sx, sy, player.w, player.h);
+
+    // face
+    ctx.fillStyle = "#fde68a";
+    ctx.fillRect(sx+3, sy+3, 8, 6);
+
+    // hair
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(sx+3, sy+2, 8, 2);
+
+    // eye
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(sx + (player.face>0 ? 8 : 5), sy+5, 1, 1);
+
+    // legs
+    ctx.fillStyle = "#1f2937";
+    ctx.fillRect(sx+2, sy+12, 4, 6);
+    ctx.fillRect(sx+8, sy+12, 4, 6);
+  }
+
+  function drawMarkerOverlay(m) {
+    // Render a chunky pixel "dialog" box
+    const pad = 10;
+    const boxW = Math.min(INTERNAL_W - pad*2, 420);
+    const boxH = 78;
+    const x = (INTERNAL_W - boxW)/2;
+    const y = 46;
+
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    ctx.fillStyle = m.color;
+    ctx.fillRect(x, y, boxW, 8);
+
+    // "Pixel text" approximations (we'll use real text, but keep it minimal)
+    ctx.fillStyle = "#e5e7eb";
+    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText(m.title, x+10, y+22);
+
+    ctx.fillStyle = "rgba(229,231,235,0.9)";
+    for (let i=0;i<m.lines.length;i++){
+      ctx.fillText("- " + m.lines[i], x+10, y+38 + i*12);
+    }
+
+    ctx.fillStyle = "rgba(229,231,235,0.7)";
+    ctx.fillText("Press X to dismiss", x+10, y+boxH-10);
+  }
+
+  function drawProfileOverlay() {
+    // Profile panel positioned below HUD menu
+    const pad = 12;
+    const boxW = Math.min(450, INTERNAL_W - pad*2);
+    const boxH = 180;
+    const x = pad;
+    const y = 95; // Below the HUD menu
+
+    // Profile panel background
+    ctx.fillStyle = "rgba(31,41,55,0.95)";
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    // Header
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(x, y, boxW, 14);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("TIM REGEN — CAREER PROFILE", x+8, y+10);
+
+    // Set up clipping region for scrollable content
+    ctx.save();
+    const contentY = y + 18;
+    const contentH = boxH - 24;
+    ctx.beginPath();
+    ctx.rect(x, contentY, boxW, contentH);
+    ctx.clip();
+
+    // Content - compact view with scroll offset
+    let currentY = contentY + 4 - state.profileScroll;
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+
+    markers.forEach((m, idx) => {
+      // Milestone header
+      ctx.fillStyle = m.color;
+      ctx.fillRect(x+8, currentY-2, 4, 4);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(m.title.substring(0, 50), x+16, currentY+2);
+      currentY += 10;
+
+      // Skills for this milestone (compact)
+      ctx.fillStyle = "rgba(168,139,250,0.8)";
+      ctx.font = "6px ui-monospace, Menlo, Consolas, monospace";
+      const skillsText = m.artifacts.map(a => a.name).join(', ');
+      // Wrap if too long
+      const maxWidth = boxW - 30;
+      if (ctx.measureText(skillsText).width > maxWidth) {
+        const parts = [];
+        let current = '';
+        skillsText.split(', ').forEach(skill => {
+          const test = current ? current + ', ' + skill : skill;
+          if (ctx.measureText(test).width > maxWidth) {
+            if (current) parts.push(current);
+            current = skill;
+          } else {
+            current = test;
+          }
+        });
+        if (current) parts.push(current);
+        parts.slice(0, 2).forEach((part, i) => {
+          ctx.fillText(part + (i === 0 && parts.length > 1 ? '...' : ''), x+18, currentY);
+          currentY += 8;
+        });
+      } else {
+        ctx.fillText(skillsText, x+18, currentY);
+        currentY += 8;
+      }
+      currentY += 4;
+    });
+
+    ctx.restore();
+
+    // Scrollbar indicator
+    const totalHeight = markers.length * 35; // Approximate content height
+    const scrollbarH = Math.max(20, (contentH / totalHeight) * contentH);
+    const scrollbarY = contentY + (state.profileScroll / totalHeight) * (contentH - scrollbarH);
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.fillRect(x + boxW - 6, scrollbarY, 3, scrollbarH);
+
+    // Footer
+    ctx.fillStyle = "rgba(229,231,235,0.6)";
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("Press P to close | ↑↓ to scroll", x+8, y+boxH-6);
+  }
+
+  function drawArtifactsOverlay() {
+    // Artifacts panel positioned below HUD menu on right side
+    const pad = 12;
+    const boxW = Math.min(320, INTERNAL_W - pad*2);
+    const boxH = 180;
+    const x = INTERNAL_W - boxW - pad;
+    const y = 95; // Below the HUD menu
+
+    // Panel background
+    ctx.fillStyle = "rgba(31,41,55,0.95)";
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    // Header
+    ctx.fillStyle = "#22c55e";
+    ctx.fillRect(x, y, boxW, 14);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("COLLECTED SKILLS & ARTIFACTS", x+8, y+10);
+
+    // Set up clipping region for scrollable content
+    ctx.save();
+    const contentY = y + 18;
+    const contentH = boxH - 24;
+    ctx.beginPath();
+    ctx.rect(x, contentY, boxW, contentH);
+    ctx.clip();
+
+    // Content with scroll offset
+    let currentY = contentY + 4 - state.artifactsScroll;
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+
+    // Collected marker artifacts (skills)
+    const collectedSkills = markerArtifacts.filter(a => a.taken);
+    if (collectedSkills.length > 0) {
+      ctx.fillStyle = "#a78bfa";
+      ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(`Skills Acquired (${collectedSkills.length}/${markerArtifacts.length})`, x+8, currentY);
+      currentY += 12;
+
+      ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+      collectedSkills.forEach(skill => {
+        // Color indicator
+        ctx.fillStyle = skill.color;
+        ctx.fillRect(x+10, currentY-3, 3, 3);
+        
+        // Skill name
+        ctx.fillStyle = "#e5e7eb";
+        ctx.fillText(skill.label, x+18, currentY);
+        currentY += 9;
+      });
+      currentY += 6;
+    }
+
+    // Collected play mode artifacts
+    const collectedArtifacts = artifacts.filter(a => a.taken);
+    if (collectedArtifacts.length > 0) {
+      ctx.fillStyle = "#22c55e";
+      ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(`Projects (${collectedArtifacts.length}/${artifacts.length})`, x+8, currentY);
+      currentY += 12;
+
+      ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+      collectedArtifacts.forEach(art => {
+        // Color indicator
+        ctx.fillStyle = art.color;
+        ctx.fillRect(x+10, currentY-3, 3, 3);
+        
+        // Artifact name
+        ctx.fillStyle = "#e5e7eb";
+        ctx.fillText(art.label, x+18, currentY);
+        currentY += 9;
+      });
+    }
+
+    // If nothing collected yet
+    if (collectedSkills.length === 0 && collectedArtifacts.length === 0) {
+      ctx.fillStyle = "rgba(229,231,235,0.6)";
+      ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("No artifacts collected yet.", x+8, currentY);
+      currentY += 10;
+      ctx.fillText("Collect skill gems at milestones!", x+8, currentY);
+    }
+
+    ctx.restore();
+
+    // Scrollbar indicator
+    const totalHeight = (collectedSkills.length + collectedArtifacts.length) * 9 + 40;
+    if (totalHeight > contentH) {
+      const scrollbarH = Math.max(20, (contentH / totalHeight) * contentH);
+      const scrollbarY = contentY + (state.artifactsScroll / totalHeight) * (contentH - scrollbarH);
+      ctx.fillStyle = "rgba(255,255,255,0.3)";
+      ctx.fillRect(x + boxW - 6, scrollbarY, 3, scrollbarH);
+    }
+
+    // Footer
+    ctx.fillStyle = "rgba(229,231,235,0.6)";
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("Press A to close | ↑↓ to scroll", x+8, y+boxH-6);
+  }
+
+  function drawArtifactsDialog() {
+    // Artifacts dialog positioned below HUD menu on right side
+    const pad = 12;
+    const boxW = Math.min(280, INTERNAL_W - pad*2);
+    const boxH = 180;
+    const x = INTERNAL_W - boxW - pad;
+    const y = 95;
+
+    // Dialog background
+    ctx.fillStyle = "rgba(31,41,55,0.95)";
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    // Header
+    ctx.fillStyle = "#22c55e";
+    ctx.fillRect(x, y, boxW, 14);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("COLLECTED SKILLS", x+8, y+10);
+
+    // Content
+    let currentY = y + 24;
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+
+    // Group artifacts by milestone
+    markers.forEach((m, idx) => {
+      const collectedFromMilestone = markerArtifacts.filter(a => 
+        a.taken && a.x >= m.x - 20 && a.x <= m.x + 70
+      );
+
+      if (collectedFromMilestone.length > 0) {
+        // Milestone header
+        ctx.fillStyle = m.color;
+        ctx.fillRect(x+8, currentY-2, 4, 4);
+        ctx.fillStyle = "#e5e7eb";
+        ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+        const shortTitle = m.title.split(':')[0].substring(0, 30);
+        ctx.fillText(shortTitle, x+16, currentY+2);
+        currentY += 10;
+
+        // List collected skills
+        ctx.fillStyle = "rgba(229,231,235,0.8)";
+        ctx.font = "6px ui-monospace, Menlo, Consolas, monospace";
+        collectedFromMilestone.forEach(a => {
+          ctx.fillStyle = m.color;
+          ctx.fillRect(x+18, currentY-1, 2, 2);
+          ctx.fillStyle = "rgba(229,231,235,0.8)";
+          ctx.fillText(a.label, x+24, currentY+1);
+          currentY += 8;
+        });
+        currentY += 4;
+      }
+    });
+
+    // Show collected artifacts from play mode
+    const playArtifacts = artifacts.filter(a => a.taken);
+    if (playArtifacts.length > 0) {
+      ctx.fillStyle = "#7dd3fc";
+      ctx.fillRect(x+8, currentY-2, 4, 4);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("Skills Park", x+16, currentY+2);
+      currentY += 10;
+
+      ctx.fillStyle = "rgba(229,231,235,0.8)";
+      ctx.font = "6px ui-monospace, Menlo, Consolas, monospace";
+      playArtifacts.forEach(a => {
+        ctx.fillStyle = "#22c55e";
+        ctx.fillRect(x+18, currentY-1, 2, 2);
+        ctx.fillStyle = "rgba(229,231,235,0.8)";
+        ctx.fillText(a.label, x+24, currentY+1);
+        currentY += 8;
+      });
+    }
+
+    // Footer
+    ctx.fillStyle = "rgba(229,231,235,0.6)";
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText(`Total: ${state.score} | Press A to close`, x+8, y+boxH-6);
+  }
+
+  function drawArtifactsDialog() {
+    // Artifacts list dialog
+    const boxW = 240;
+    const boxH = 190;
+    const x = (INTERNAL_W - boxW) / 2;
+    const y = 60;
+
+    // Dialog background
+    ctx.fillStyle = "rgba(31,41,55,0.95)";
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    // Header
+    ctx.fillStyle = "#22c55e";
+    ctx.fillRect(x, y, boxW, 14);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("COLLECTED ARTIFACTS", x+8, y+10);
+
+    // Stats
+    const totalArtifacts = markerArtifacts.length + artifacts.length;
+    const collectedCount = markerArtifacts.filter(a => a.taken).length + artifacts.filter(a => a.taken).length;
+    ctx.fillStyle = "rgba(229,231,235,0.9)";
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText(`${collectedCount} / ${totalArtifacts} collected`, x+8, y+26);
+
+    // Milestone artifacts
+    let currentY = y + 38;
+    ctx.fillStyle = "#a78bfa";
+    ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("MILESTONE SKILLS:", x+8, currentY);
+    currentY += 12;
+
+    ctx.font = "6px ui-monospace, Menlo, Consolas, monospace";
+    markers.forEach(m => {
+      const milestoneArtifacts = markerArtifacts.filter(a => 
+        a.x >= m.x - 20 && a.x <= m.x + 70
+      );
+      const collected = milestoneArtifacts.filter(a => a.taken).length;
+      const total = milestoneArtifacts.length;
+      
+      ctx.fillStyle = m.color;
+      ctx.fillRect(x+10, currentY-2, 3, 3);
+      
+      ctx.fillStyle = collected === total ? "#22c55e" : "rgba(229,231,235,0.7)";
+      const shortTitle = m.title.split(':')[0].substring(0, 20);
+      ctx.fillText(`${shortTitle}: ${collected}/${total}`, x+16, currentY);
+      currentY += 9;
+    });
+
+    // Play mode artifacts
+    if (state.mode === "PLAY") {
+      currentY += 6;
+      ctx.fillStyle = "#22c55e";
+      ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("SKILLS PARK:", x+8, currentY);
+      currentY += 10;
+
+      const playCollected = artifacts.filter(a => a.taken).length;
+      const playTotal = artifacts.length;
+      ctx.fillStyle = playCollected === playTotal ? "#22c55e" : "rgba(229,231,235,0.7)";
+      ctx.font = "6px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(`Collected: ${playCollected}/${playTotal}`, x+10, currentY);
+    }
+
+    // Footer
+    ctx.fillStyle = "rgba(229,231,235,0.6)";
+    ctx.font = "7px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("Press A to close", x+8, y+boxH-8);
+  }
+
+  // ----------------------------
+  // Update loop
+  // ----------------------------
+  let last = performance.now();
+  function tick(now) {
+    const dt = Math.min(32, now - last);
+    last = now;
+
+    update(dt);
+    render();
+
+    requestAnimationFrame(tick);
+  }
+
+  function update(dt) {
+    // Handle profile scrolling when visible
+    if (state.showProfile) {
+      if (pressed('arrowup')) {
+        state.profileScroll = Math.max(0, state.profileScroll - 2);
+      }
+      if (pressed('arrowdown')) {
+        state.profileScroll = Math.min(300, state.profileScroll + 2);
+      }
+      return; // Skip game update when profile is showing
+    }
+    
+    // Handle artifacts scrolling when visible
+    if (state.showArtifacts) {
+      if (pressed('arrowup')) {
+        state.artifactsScroll = Math.max(0, state.artifactsScroll - 2);
+      }
+      if (pressed('arrowdown')) {
+        state.artifactsScroll = Math.min(200, state.artifactsScroll + 2);
+      }
+      return; // Skip game update when artifacts is showing
+    }
+
+    // horizontal movement
+    const accel = (state.mode === "TIMELINE") ? 0.25 : 0.22;
+    const maxV = (state.mode === "TIMELINE") ? 2.2 : 2.0;
+
+    let move = 0;
+    if (pressed('arrowleft')) move -= 1;
+    if (pressed('arrowright')) move += 1;
+
+    if (move !== 0) player.face = Math.sign(move);
+
+    // In TIMELINE mode, nudge forward if you're not pressing anything (keeps the "tour" moving).
+    // But in return mode, move backward to collect missed gems
+    if (state.mode === "TIMELINE" && move === 0) {
+      if (state.returnMode) {
+        move = -1; // Move backward
+        
+        // Check if we've returned far enough and collected all gems
+        const m = state.returnMode.milestone;
+        const missedGems = markerArtifacts.filter(a => 
+          !a.taken && 
+          a.x >= m.x - 20 && 
+          a.x <= m.x + 70
+        );
+        
+        if (player.x <= state.returnMode.targetX || missedGems.length === 0) {
+          // All gems collected or reached target, resume forward
+          state.returnMode = null;
+          player.face = 1;
+          move = 1;
+        }
+      } else {
+        move = 1; // Normal forward movement
+      }
+    }
+
+    player.vx += move * accel;
+    // Reduce damping in TIMELINE mode to maintain jump arc momentum
+    player.vx *= (state.mode === "TIMELINE") ? 0.94 : 0.86;
+    // Allow higher speed during jumps in TIMELINE mode
+    const maxSpeed = (state.mode === "TIMELINE" && !player.onGround) ? 6.0 : maxV;
+    player.vx = clamp(player.vx, -maxSpeed, maxSpeed);
+
+    // Auto-jump at milestones in TIMELINE mode
+    if (state.mode === "TIMELINE" && !state.returnMode) {
+      for (const m of markers) {
+        const dist = player.x - m.x;
+        // Long jump starting earlier to arc across all artifacts
+        if (dist > -65 && dist < -50 && player.onGround) {
+          if (!state.jumpedAt || Math.abs(state.jumpedAt - m.x) > 5) {
+            player.vy = -6.8;  // Moderate jump height
+            player.vx = 3.2;   // Moderate forward momentum
+            player.onGround = false;
+            state.jumpedAt = m.x;
+            state.lastJumpedMilestone = m;
+          }
+        }
+        
+        // Check if we passed a milestone and missed any gems
+        if (state.lastJumpedMilestone === m && player.x > m.x + 80 && player.onGround) {
+          const missedGems = markerArtifacts.filter(a => 
+            !a.taken && 
+            a.x >= m.x - 20 && 
+            a.x <= m.x + 70
+          );
+          
+          if (missedGems.length > 0) {
+            // Initiate return mode
+            state.returnMode = {
+              milestone: m,
+              targetX: m.x - 30,
+              originalFace: player.face
+            };
+            player.face = -1;
+            state.lastJumpedMilestone = null;
+          } else {
+            state.lastJumpedMilestone = null;
+          }
+        }
+      }
+      // Also jump at NOW gate
+      const distNow = player.x - NOW_X;
+      if (distNow > -42 && distNow < -28 && player.onGround) {
+        if (!state.jumpedAt || Math.abs(state.jumpedAt - NOW_X) > 5) {
+          player.vy = -6.2;
+          player.onGround = false;
+          state.jumpedAt = NOW_X;
+        }
+      }
+    }
+
+    // jump (manual control)
+    const wantsJump = pressed('z') || pressed('space');
+    if (wantsJump && player.onGround) {
+      player.vy = -5.9;
+      player.onGround = false;
+    }
+
+    // gravity
+    player.vy += world.gravity;
+    player.vy = clamp(player.vy, -10, 10);
+
+    // integrate
+    player.x += player.vx;
+    player.y += player.vy;
+
+    // floor collision
+    const floorTop = world.floorY - player.h;
+    if (player.y >= floorTop) {
+      player.y = floorTop;
+      player.vy = 0;
+      player.onGround = true;
+    }
+
+    // clamp world bounds
+    player.x = clamp(player.x, 0, world.width - player.w);
+
+    // Marker interaction
+    const nearMarker = markers.find(m => Math.abs(player.x - m.x) < 28);
+    if (state.activeMarker == null && nearMarker) {
+      state.activeMarker = nearMarker;
+      // Collect artifact from milestone
+      if (!nearMarker.collected) {
+        nearMarker.collected = true;
+        state.score += 1;
+        ui.score.textContent = String(state.score);
+        showToast(`<b>Milestone Reached!</b> ${nearMarker.title.split(':')[0]}<br>Press <span class="kbd">X</span> to read details (+1)`, 2200);
+      } else {
+        showToast(`<b>${nearMarker.title}</b><br><span class="dim">Press <span class="kbd">X</span> to read</span>`, 1600);
+      }
+    }
+    if (!nearMarker && state.activeMarker) {
+      // keep activeMarker if the dialog is open; otherwise clear it
+      if (!state.dialogOpen) state.activeMarker = null;
+    }
+
+    // Open/close marker dialog
+    if (pressed('x')) {
+      // debounce-ish: only react once per press (simple lock)
+      if (!state.xHeld) {
+        state.xHeld = true;
+
+        // If we're standing at NOW gate, toggle to PLAY mode
+        if (Math.abs(player.x - NOW_X) < 42 && state.mode === "TIMELINE") {
+          enterPlayMode();
+        } else if (state.activeMarker) {
+          state.dialogOpen = !state.dialogOpen;
+          if (!state.dialogOpen) state.activeMarker = null;
+        }
+      }
+    } else {
+      state.xHeld = false;
+    }
+
+    // If dialog open, freeze movement a bit (still allow tiny drift)
+    if (state.dialogOpen) {
+      player.vx *= 0.6;
+    }
+
+    // NOW gate: in TIMELINE mode, stop at NOW until player presses X
+    if (state.mode === "TIMELINE") {
+      if (player.x > NOW_X - 18) {
+        player.x = NOW_X - 18;
+        player.vx = 0;
+        state.lockAtNow = true;
+        
+        // Increment timer
+        state.nowGateTimer += dt;
+        
+        // Check if 15 seconds have passed
+        if (state.nowGateTimer >= state.nowGateWaitTime) {
+          restartTimeline();
+          return;
+        }
+        
+        const secondsLeft = Math.ceil((state.nowGateWaitTime - state.nowGateTimer) / 1000);
+        ui.modeLine.textContent = `Mode: TIMELINE (at NOW — press X to begin play) [${secondsLeft}s]`;
+        
+        if (!state.nowToastShown) {
+          state.nowToastShown = true;
+          showToast(`<b>YOU REACHED NOW</b><br>Press <span class="kbd">X</span> to start interactive play mode`, 2600);
+        }
+      } else {
+        state.nowGateTimer = 0; // Reset timer if not at gate
+        ui.modeLine.textContent = "Mode: TIMELINE (run to NOW)";
+      }
+    }
+
+    // Collect marker artifacts (always available) - expanded collision for reliable collection
+    for (const a of markerArtifacts) {
+      if (a.taken) continue;
+      if (aabb(player.x-4, player.y-4, player.w+8, player.h+8, a.x-6, a.y-6, 12, 12)) {
+        a.taken = true;
+        state.score += 1;
+        ui.score.textContent = String(state.score);
+        showToast(`Skill: <b>${a.label}</b> (+1)`, 1100);
+      }
+    }
+
+    // PLAY mode: collectible artifacts
+    if (state.mode === "PLAY") {
+      for (const a of artifacts) {
+        if (a.taken) continue;
+        if (aabb(player.x, player.y, player.w, player.h, a.x-6, a.y-6, 12, 12)) {
+          a.taken = true;
+          state.score += 1;
+          ui.score.textContent = String(state.score);
+          showToast(`Collected: <b>${a.label}</b> (+1)`, 900);
+        }
+      }
+    }
+
+    // camera follows player
+    const targetCamX = clamp(player.x - INTERNAL_W*0.45, 0, world.width - INTERNAL_W);
+    state.camX += (targetCamX - state.camX) * 0.10;
+
+    ui.pos.textContent = String((player.x|0));
+  }
+
+  function enterPlayMode() {
+    state.mode = "PLAY";
+    state.lockAtNow = false;
+    state.dialogOpen = false;
+    state.activeMarker = null;
+    state.nowGateTimer = 0;
+    ui.modeLine.textContent = "Mode: PLAY (collect artifacts + keep building the world)";
+    showToast(
+      `<b>PLAY MODE UNLOCKED</b><br>` +
+      `Now you can explore beyond NOW and collect artifacts that represent your work.` ,
+      2400
+    );
+  }
+
+  function restartTimeline() {
+    // Reset player position and state
+    player.x = 60;
+    player.y = world.floorY - 20;
+    player.vx = 0;
+    player.vy = 0;
+    player.onGround = false;
+    
+    // Reset markers
+    markers.forEach(m => m.collected = false);
+    
+    // Reset all artifacts
+    markerArtifacts.forEach(a => a.taken = false);
+    artifacts.forEach(a => a.taken = false);
+    
+    // Reset state
+    state.mode = "TIMELINE";
+    state.score = 0;
+    state.lockAtNow = false;
+    state.nowGateTimer = 0;
+    state.nowToastShown = false;
+    state.activeMarker = null;
+    state.dialogOpen = false;
+    state.jumpedAt = null;
+    state.returnMode = null;
+    state.lastJumpedMilestone = null;
+    
+    // Update UI
+    ui.score.textContent = "0";
+    ui.modeLine.textContent = "Mode: TIMELINE (run to NOW)";
+    
+    showToast(`<b>TIMELINE RESTARTED</b><br>Let's journey through your career again! 🚀`, 2200);
+  }
+
+  function render() {
+    // clear / background
+    drawSky();
+    drawParallax();
+
+    // camera transform is manual through worldToScreenX/Y
+    drawGround();
+
+    // markers
+    for (const m of markers) {
+      const sx = worldToScreenX(m.x);
+      if (sx > -80 && sx < INTERNAL_W+80) drawSignpost(m);
+    }
+
+    // NOW gate
+    {
+      const sx = worldToScreenX(NOW_X);
+      if (sx > -140 && sx < INTERNAL_W+140) drawNowGate();
+    }
+
+    // marker artifacts (skills at milestones)
+    for (const a of markerArtifacts) {
+      const sx = worldToScreenX(a.x);
+      if (sx > -40 && sx < INTERNAL_W+40) drawArtifact(a);
+    }
+
+    // artifacts (only visible beyond NOW)
+    for (const a of artifacts) {
+      const sx = worldToScreenX(a.x);
+      if (sx > -40 && sx < INTERNAL_W+40) drawArtifact(a);
+    }
+
+    // player
+    drawPlayer();
+
+    // overlay dialog
+    if (state.dialogOpen && state.activeMarker) {
+      drawMarkerOverlay(state.activeMarker);
+    }
+
+    // Profile overlay (press P)
+    if (state.showProfile) {
+      drawProfileOverlay();
+    }
+
+    // Artifacts dialog (press A)
+    if (state.showArtifacts) {
+      drawArtifactsOverlay();
+    }
+
+    // small hint near NOW gate
+    if (state.mode === "TIMELINE" && player.x > NOW_X - 120) {
+      ctx.fillStyle = "rgba(229,231,235,0.8)";
+      ctx.font = "10px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText("→ NOW gate ahead (press X)", 12, 248);
+    }
+  }
+
+  // Start
+  ui.score.textContent = "0";
+  ui.pos.textContent = "0";
+  showToast(`Run through your timeline → reach <b>NOW</b> → press <span class="kbd">X</span> to start play`, 2400);
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
