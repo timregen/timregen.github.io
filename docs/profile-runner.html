@@ -47,7 +47,7 @@
   <div class="panel">
     <div class="title">Tim Regen — Profile Runner</div>
     <div class="dim" id="modeLine">Mode: TIMELINE (run to NOW)</div>
-    <div class="dim">Move: <span class="kbd">←</span> <span class="kbd">→</span> Jump: <span class="kbd">Z</span>/<span class="kbd">Space</span> Interact: <span class="kbd">X</span> Show Profile: <span class="kbd">P</span> Artifacts: <span class="kbd">A</span></div>
+    <div class="dim">Move: <span class="kbd">←</span> <span class="kbd">→</span> Jump: <span class="kbd">Z</span>/<span class="kbd">Space</span> Show Profile: <span class="kbd">P</span> Artifacts: <span class="kbd">A</span></div>
   </div>
   <div class="panel">
     <div class="dim">Artifacts: <span id="score">0</span></div>
@@ -91,7 +91,6 @@
     left: { x: 20, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
     right: { x: 70, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
     jump: { x: INTERNAL_W - 110, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
-    interact: { x: INTERNAL_W - 60, y: INTERNAL_H - 60, w: 40, h: 40, active: false },
     profile: { x: INTERNAL_W - 110, y: 20, w: 40, h: 20, active: false },
     artifacts: { x: INTERNAL_W - 60, y: 20, w: 40, h: 20, active: false },
   };
@@ -167,11 +166,6 @@
         touchButtons.jump.active = true;
         keys.add('z');
       }
-      if (tx >= touchButtons.interact.x && tx <= touchButtons.interact.x + touchButtons.interact.w &&
-          ty >= touchButtons.interact.y && ty <= touchButtons.interact.y + touchButtons.interact.h) {
-        touchButtons.interact.active = true;
-        keys.add('x');
-      }
       if (tx >= touchButtons.profile.x && tx <= touchButtons.profile.x + touchButtons.profile.w &&
           ty >= touchButtons.profile.y && ty <= touchButtons.profile.y + touchButtons.profile.h) {
         state.showProfile = !state.showProfile;
@@ -214,11 +208,9 @@
       touchButtons.left.active = false;
       touchButtons.right.active = false;
       touchButtons.jump.active = false;
-      touchButtons.interact.active = false;
       keys.delete('arrowleft');
       keys.delete('arrowright');
       keys.delete('z');
-      keys.delete('x');
     }
     touchScrollStart = null;
   }, { passive: false });
@@ -228,11 +220,9 @@
     touchButtons.left.active = false;
     touchButtons.right.active = false;
     touchButtons.jump.active = false;
-    touchButtons.interact.active = false;
     keys.delete('arrowleft');
     keys.delete('arrowright');
     keys.delete('z');
-    keys.delete('x');
     touchScrollStart = null;
   }, { passive: false });
 
@@ -611,6 +601,21 @@
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
     ctx.fillText("SKILLS PARK", sx+18, topY+11);
+    
+    // Red revolving emergency light on top
+    const lightY = topY - 12;
+    const lightX = sx + 54; // center of gate
+    // Light flashes based on time (pulse effect)
+    const pulse = Math.sin(performance.now() / 200) * 0.5 + 0.5;
+    ctx.fillStyle = `rgba(239, 68, 68, ${0.3 + pulse * 0.7})`;
+    ctx.beginPath();
+    ctx.arc(lightX, lightY, 8, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright core
+    ctx.fillStyle = `rgba(255, 100, 100, ${0.6 + pulse * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(lightX, lightY, 5, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   function drawArtifact(a) {
@@ -1207,51 +1212,43 @@
       if (!state.dialogOpen) state.activeMarker = null;
     }
 
-    // Open/close marker dialog
-    if (pressed('x')) {
-      // debounce-ish: only react once per press (simple lock)
-      if (!state.xHeld) {
-        state.xHeld = true;
-
-        // If we're standing at NOW gate, toggle to PLAY mode
-        if (Math.abs(player.x - NOW_X) < 42 && state.mode === "TIMELINE") {
-          enterPlayMode();
-        } else if (state.activeMarker) {
-          state.dialogOpen = !state.dialogOpen;
-          if (!state.dialogOpen) state.activeMarker = null;
-        }
-      }
-    } else {
-      state.xHeld = false;
-    }
-
     // If dialog open, freeze movement a bit (still allow tiny drift)
     if (state.dialogOpen) {
       player.vx *= 0.6;
     }
 
-    // NOW gate: in TIMELINE mode, stop at NOW until player presses X
+    // NOW gate: in TIMELINE mode, stop at NOW and wait for right arrow or timeout
     if (state.mode === "TIMELINE") {
       if (player.x > NOW_X - 18) {
         player.x = NOW_X - 18;
         player.vx = 0;
         state.lockAtNow = true;
         
-        // Increment timer
-        state.nowGateTimer += dt;
+        // Calculate total wait time based on gems collected (5 seconds per gem)
+        const baseTime = 15000; // 15 seconds base
+        const gemCount = markerArtifacts.filter(a => a.taken).length;
+        const bonusTime = gemCount * 5000; // 5 seconds per gem
+        const totalWaitTime = baseTime + bonusTime;
         
-        // Check if 15 seconds have passed
-        if (state.nowGateTimer >= state.nowGateWaitTime) {
-          restartTimeline();
-          return;
+        // Check for right arrow to enter PLAY mode
+        const pressedRight = pressed('arrowright');
+        if (pressedRight) {
+          enterPlayMode();
+        } else {
+          // Increment countdown timer
+          state.nowGateTimer += dt;
+          
+          // Check if countdown expired
+          if (state.nowGateTimer >= totalWaitTime) {
+            restartTimeline();
+            return;
+          }
         }
-        
-        const secondsLeft = Math.ceil((state.nowGateWaitTime - state.nowGateTimer) / 1000);
-        ui.modeLine.textContent = `Mode: TIMELINE (at NOW — press X to begin play) [${secondsLeft}s]`;
         
         if (!state.nowToastShown) {
           state.nowToastShown = true;
-          showToast(`<b>YOU REACHED NOW</b><br>Press <span class="kbd">X</span> to start interactive play mode`, 2600);
+          const bonusText = gemCount > 0 ? ` (+${gemCount * 5}s bonus)` : '';
+          showToast(`<b>YOU REACHED NOW</b><br>Press \u2192 to start play mode${bonusText}`, 2600);
         }
       } else {
         state.nowGateTimer = 0; // Reset timer if not at gate
@@ -1404,6 +1401,32 @@
       drawArtifactsOverlay();
     }
 
+    // Time Left display at NOW gate (flashing)
+    if (state.mode === "TIMELINE" && state.lockAtNow) {
+      const gemCount = markerArtifacts.filter(a => a.taken).length;
+      const baseTime = 15000;
+      const bonusTime = gemCount * 5000;
+      const totalWaitTime = baseTime + bonusTime;
+      const secondsLeft = Math.max(0, Math.ceil((totalWaitTime - state.nowGateTimer) / 1000));
+      
+      // Flashing effect
+      const flash = Math.sin(performance.now() / 150) > 0 ? 1 : 0.3;
+      ctx.fillStyle = `rgba(239, 68, 68, ${flash})`;
+      ctx.font = "bold 32px ui-monospace, Menlo, Consolas, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("TIME LEFT", INTERNAL_W / 2, 80);
+      ctx.font = "bold 48px ui-monospace, Menlo, Consolas, monospace";
+      ctx.fillText(secondsLeft, INTERNAL_W / 2, 140);
+      ctx.textAlign = "left";
+    }
+
+    // Light reflection on background when in PLAY mode
+    if (state.mode === "PLAY") {
+      const pulse = Math.sin(performance.now() / 200) * 0.5 + 0.5;
+      ctx.fillStyle = `rgba(239, 68, 68, ${0.05 * pulse})`;
+      ctx.fillRect(0, 0, INTERNAL_W, INTERNAL_H * 0.3);
+    }
+
     // small hint near NOW gate
     if (state.mode === "TIMELINE" && player.x > NOW_X - 120) {
       ctx.fillStyle = "rgba(229,231,235,0.8)";
@@ -1442,16 +1465,6 @@
       ctx.fillStyle = "#fff";
       ctx.font = "bold 8px ui-monospace, Menlo, Consolas, monospace";
       ctx.fillText("JUMP", touchButtons.jump.x + 8, touchButtons.jump.y + 24);
-      
-      // Interact button
-      ctx.fillStyle = touchButtons.interact.active ? "rgba(96,165,250,0.6)" : "rgba(96,165,250,0.4)";
-      ctx.fillRect(touchButtons.interact.x, touchButtons.interact.y, touchButtons.interact.w, touchButtons.interact.h);
-      ctx.strokeStyle = "rgba(255,255,255,0.5)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(touchButtons.interact.x, touchButtons.interact.y, touchButtons.interact.w, touchButtons.interact.h);
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 7px ui-monospace, Menlo, Consolas, monospace";
-      ctx.fillText("X", touchButtons.interact.x + 15, touchButtons.interact.y + 24);
     }
     
     // Profile/Artifacts buttons (always visible)
